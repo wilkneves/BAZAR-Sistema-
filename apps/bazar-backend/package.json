@@ -1,0 +1,53 @@
+{
+  "name": "bazar-luz-da-esperanca-backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prisma:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "tsx prisma/seed.ts",
+    "test:smoke": "tsx tests/smoke.ts",
+    "audit": "npm audit --audit-level=high",
+    "test:concorrencia": "tsx tests/concorrencia.ts",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/cors": "^11.3.0",
+    "@fastify/helmet": "^13.1.1",
+    "@fastify/multipart": "^10.1.2",
+    "@fastify/rate-limit": "^11.2.0",
+    "@prisma/adapter-pg": "7.10.0",
+    "@prisma/client": "7.10.0",
+    "argon2": "^0.45.1",
+    "dotenv": "^18.0.5",
+    "exceljs": "^4.4.0",
+    "fastify": "^5.12.5",
+    "fastify-plugin": "^5.1.0",
+    "file-type": "^22.1.1",
+    "jose": "^6.2.12",
+    "pdfkit": "^0.20.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/pdfkit": "^0.17.6",
+    "prisma": "7.10.0",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.2"
+  },
+  "overrides": {
+    "mysql2": "^3.24.5",
+    "deepmerge-ts": "^8.0.2",
+    "uuid": "^11.1.1"
+  }
+}

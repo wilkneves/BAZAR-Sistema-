@@ -1,0 +1,13 @@
+node_modules
+apps/*/node_modules
+apps/*/dist
+apps/*/.env
+apps/*/.env.*
+.env
+.env.*
+.DS_Store
+*.log
+*.tsbuildinfo
+*.zip
+*.tar.gz
+*.tgz

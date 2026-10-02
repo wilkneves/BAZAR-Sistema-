@@ -1,0 +1,792 @@
+// Sistema de Bazar — Luz da Esperança
+// Gerado a partir do dicionário de dados do documento 04 — Modelagem do Banco de Dados (v1.2).
+// Prisma 7: a URL do banco fica em prisma.config.ts (não aqui).
+//
+// Diferenças em relação ao documento 04 (registradas no README do back-end):
+//  - instituicao.endereco: o front-end (seção 5) envia endereço; o doc 04 não tinha a coluna.
+//  - saldo_estoque (0003): saldo materializado, mantido pelo trigger de movimentação.
+//  - idempotencia: tabela técnica para reenvio seguro de transferência/baixa/ajuste
+//    (movimentacao usa id bigint, então o id do cliente não pode ser a PK).
+// As regras de integridade (CHECK, triggers, views, índices parciais) ficam em
+// prisma/migrations/0002_invariantes/migration.sql.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================ Enumerações ============================
+
+enum TipoParceiro {
+  EMPRESA
+  LOJA
+  PESSOA_FISICA
+  OUTRO
+}
+
+enum TipoEntrada {
+  DOACAO
+  COMPRA
+  SALDO_INICIAL
+}
+
+enum StatusLote {
+  AGUARDANDO_TRIAGEM
+  EM_TRIAGEM
+  TRIADO
+}
+
+enum TipoDocumentoOrigem {
+  NOTA_FISCAL
+  TERMO_DOACAO
+  RECIBO
+  OUTRO
+}
+
+enum TipoControle {
+  ETIQUETADO
+  CATEGORIA
+}
+
+enum TipoMovimentacao {
+  ENTRADA
+  TRANSFERENCIA
+  VENDA
+  ESTORNO_VENDA
+  BAIXA
+  AJUSTE_ENTRADA
+  AJUSTE_SAIDA
+}
+
+enum StatusCaixa {
+  ABERTO
+  FECHADO
+}
+
+enum TipoLancamentoCaixa {
+  SUPRIMENTO
+  SANGRIA
+}
+
+enum StatusVenda {
+  FINALIZADA
+  CANCELADA
+}
+
+enum OrigemRegistroVenda {
+  ONLINE
+  OFFLINE
+}
+
+enum FormaSelecao {
+  CODIGO
+  CATEGORIA
+}
+
+enum FormaPagamento {
+  DINHEIRO
+  PIX
+  CARTAO_DEBITO
+  CARTAO_CREDITO
+  FIADO
+}
+
+enum StatusContaReceber {
+  ABERTA
+  PARCIAL
+  QUITADA
+  CANCELADA
+}
+
+enum StatusContaPagar {
+  ABERTA
+  PAGA
+  CANCELADA
+}
+
+enum SituacaoFiscal {
+  ISENTO
+  TRIBUTADO
+}
+
+enum EscopoRegraFiscal {
+  GERAL
+  CATEGORIA
+  ITEM
+}
+
+enum TipoTitular {
+  CLIENTE
+  PARCEIRO
+}
+
+enum StatusPendencia {
+  PENDENTE
+  RESOLVIDA
+  DESCARTADA
+}
+
+// ===================== 4.1 Configuração e acesso =====================
+
+model Instituicao {
+  id           Int      @id @default(1)
+  nome         String
+  cnpj         String?  @db.Char(14)
+  uf           String   @db.Char(2)
+  endereco     String?
+  telefone     String?
+  atualizadoEm DateTime @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  @@map("instituicao")
+}
+
+model Parametro {
+  chave     String  @id
+  valor     String
+  descricao String?
+
+  @@map("parametro")
+}
+
+model Terminal {
+  id       String   @id @default(uuid()) @db.Uuid
+  nome     String   @unique
+  ativo    Boolean  @default(true)
+  criadoEm DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  sessoes    SessaoUsuario[]
+  caixas     CaixaSessao[]
+  vendas     Venda[]
+  pendencias PendenciaSincronizacao[]
+
+  @@map("terminal")
+}
+
+model Perfil {
+  id                String   @id @default(uuid()) @db.Uuid
+  nome              String   @unique
+  descricao         String?
+  padrao            Boolean  @default(false)
+  limiteDescontoPct Decimal? @map("limite_desconto_pct") @db.Decimal(5, 2)
+  ativo             Boolean  @default(true)
+  criadoEm          DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  permissoes PerfilPermissao[]
+  usuarios   Usuario[]
+
+  @@map("perfil")
+}
+
+model Permissao {
+  codigo    String @id
+  modulo    String
+  descricao String
+
+  perfis PerfilPermissao[]
+
+  @@map("permissao")
+}
+
+model PerfilPermissao {
+  perfilId        String @map("perfil_id") @db.Uuid
+  permissaoCodigo String @map("permissao_codigo")
+
+  perfil    Perfil    @relation(fields: [perfilId], references: [id])
+  permissao Permissao @relation(fields: [permissaoCodigo], references: [codigo])
+
+  @@id([perfilId, permissaoCodigo])
+  @@map("perfil_permissao")
+}
+
+model Usuario {
+  id             String    @id @default(uuid()) @db.Uuid
+  nome           String
+  login          String    @unique
+  senhaHash      String    @map("senha_hash")
+  perfilId       String    @map("perfil_id") @db.Uuid
+  ativo          Boolean   @default(true)
+  trocarSenha    Boolean   @default(true) @map("trocar_senha")
+  ultimoAcessoEm DateTime? @map("ultimo_acesso_em") @db.Timestamptz(3)
+  criadoEm       DateTime  @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm   DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  perfil  Perfil          @relation(fields: [perfilId], references: [id])
+  sessoes SessaoUsuario[]
+
+  // FKs de autoria (0003_dba_integridade_desempenho)
+  auditoriaUsuario           Auditoria[]              @relation("AuditoriaUsuario")
+  idempotenciaUsuario        Idempotencia[]           @relation("IdempotenciaUsuario")
+  consentimentoRegistradoPor Consentimento[]          @relation("ConsentimentoRegistradoPor")
+  loteRecebidoPor            LoteEntrada[]            @relation("LoteRecebidoPor")
+  itemCriadoPor              Item[]                   @relation("ItemCriadoPor")
+  descarteRegistradoPor      Descarte[]               @relation("DescarteRegistradoPor")
+  descarteRevertidoPor       Descarte[]               @relation("DescarteRevertidoPor")
+  movimentacaoUsuario        Movimentacao[]           @relation("MovimentacaoUsuario")
+  caixaAbertoPor             CaixaSessao[]            @relation("CaixaAbertoPor")
+  caixaFechadoPor            CaixaSessao[]            @relation("CaixaFechadoPor")
+  lancamentoUsuario          CaixaLancamento[]        @relation("LancamentoUsuario")
+  vendaRegistradaPor         Venda[]                  @relation("VendaRegistradaPor")
+  vendaCanceladaPor          Venda[]                  @relation("VendaCanceladaPor")
+  pendenciaResolvidaPor      PendenciaSincronizacao[] @relation("PendenciaResolvidaPor")
+  contaReceberCriadaPor      ContaReceber[]           @relation("ContaReceberCriadaPor")
+  recebimentoUsuario         Recebimento[]            @relation("RecebimentoUsuario")
+  recebimentoEstornadoPor    Recebimento[]            @relation("RecebimentoEstornadoPor")
+  contaPagarCriadaPor        ContaPagar[]             @relation("ContaPagarCriadaPor")
+  regraFiscalCriadaPor       RegraFiscal[]            @relation("RegraFiscalCriadaPor")
+
+  @@map("usuario")
+}
+
+model SessaoUsuario {
+  id               String    @id @default(uuid()) @db.Uuid
+  usuarioId        String    @map("usuario_id") @db.Uuid
+  terminalId       String?   @map("terminal_id") @db.Uuid
+  refreshTokenHash String    @unique @map("refresh_token_hash")
+  criadaEm         DateTime  @default(now()) @map("criada_em") @db.Timestamptz(3)
+  expiraEm         DateTime  @map("expira_em") @db.Timestamptz(3)
+  revogadaEm       DateTime? @map("revogada_em") @db.Timestamptz(3)
+
+  usuario  Usuario   @relation(fields: [usuarioId], references: [id])
+  terminal Terminal? @relation(fields: [terminalId], references: [id])
+
+  @@index([usuarioId])
+  @@index([terminalId])
+  @@index([expiraEm])
+  @@map("sessao_usuario")
+}
+
+model Auditoria {
+  id         BigInt   @id @default(autoincrement())
+  usuarioId  String?  @map("usuario_id") @db.Uuid
+  acao       String
+  entidade   String
+  entidadeId String   @map("entidade_id")
+  antes      Json?
+  depois     Json?
+  ip         String?
+  criadoEm   DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+  usuario    Usuario? @relation("AuditoriaUsuario", fields: [usuarioId], references: [id], onDelete: Restrict)
+
+  @@index([criadoEm])
+  @@map("auditoria")
+}
+
+/// Técnica (não está no doc 04): chave de idempotência das escritas que não têm UUID próprio.
+model Idempotencia {
+  chave     String   @id @db.Uuid
+  escopo    String
+  usuarioId String   @map("usuario_id") @db.Uuid
+  criadoEm  DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+  usuario   Usuario  @relation("IdempotenciaUsuario", fields: [usuarioId], references: [id], onDelete: Restrict)
+
+  @@index([criadoEm])
+  @@map("idempotencia")
+}
+
+// ============================ 4.2 Cadastros ============================
+
+model Categoria {
+  id                String   @id @default(uuid()) @db.Uuid
+  nome              String
+  precoPadrao       Decimal? @map("preco_padrao") @db.Decimal(10, 2)
+  vendaPorCategoria Boolean  @default(false) @map("venda_por_categoria")
+  ativa             Boolean  @default(true)
+  criadoEm          DateTime @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm      DateTime @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  itens     Item[]
+  descartes Descarte[]
+  regras    RegraFiscal[]
+
+  @@map("categoria")
+}
+
+model MotivoDescarte {
+  id    String  @id @default(uuid()) @db.Uuid
+  nome  String  @unique
+  ativo Boolean @default(true)
+
+  descartes Descarte[]
+
+  @@map("motivo_descarte")
+}
+
+model MotivoBaixa {
+  id    String  @id @default(uuid()) @db.Uuid
+  nome  String  @unique
+  ativo Boolean @default(true)
+
+  movimentacoes Movimentacao[]
+
+  @@map("motivo_baixa")
+}
+
+model Parceiro {
+  id              String       @id @default(uuid()) @db.Uuid
+  nome            String
+  tipo            TipoParceiro
+  naoIdentificado Boolean      @default(false) @map("nao_identificado")
+  documento       String?
+  telefone        String?
+  email           String?
+  cidade          String?
+  observacao      String?
+  ativo           Boolean      @default(true)
+  criadoEm        DateTime     @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm    DateTime     @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  campanhas      Campanha[]
+  lotes          LoteEntrada[]
+  consentimentos Consentimento[]
+
+  @@index([nome])
+  @@map("parceiro")
+}
+
+model Campanha {
+  id           String    @id @default(uuid()) @db.Uuid
+  nome         String
+  parceiroId   String?   @map("parceiro_id") @db.Uuid
+  dataInicio   DateTime? @map("data_inicio") @db.Date
+  dataFim      DateTime? @map("data_fim") @db.Date
+  ativa        Boolean   @default(true)
+  criadoEm     DateTime  @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  parceiro Parceiro?     @relation(fields: [parceiroId], references: [id])
+  lotes    LoteEntrada[]
+
+  @@map("campanha")
+}
+
+model Cliente {
+  id            String    @id @default(uuid()) @db.Uuid
+  nome          String
+  telefone      String
+  documento     String?
+  observacao    String?
+  ativo         Boolean   @default(true)
+  anonimizadoEm DateTime? @map("anonimizado_em") @db.Timestamptz(3)
+  criadoEm      DateTime  @default(now()) @map("criado_em") @db.Timestamptz(3)
+  atualizadoEm  DateTime  @updatedAt @map("atualizado_em") @db.Timestamptz(3)
+
+  vendas         Venda[]
+  contasReceber  ContaReceber[]
+  consentimentos Consentimento[]
+
+  @@index([nome])
+  @@index([telefone])
+  @@map("cliente")
+}
+
+model Consentimento {
+  id              String      @id @default(uuid()) @db.Uuid
+  titularTipo     TipoTitular @map("titular_tipo")
+  clienteId       String?     @map("cliente_id") @db.Uuid
+  parceiroId      String?     @map("parceiro_id") @db.Uuid
+  finalidade      String
+  versaoAviso     String      @map("versao_aviso")
+  registradoEm    DateTime    @default(now()) @map("registrado_em") @db.Timestamptz(3)
+  revogadoEm      DateTime?   @map("revogado_em") @db.Timestamptz(3)
+  registradoPorId String      @map("registrado_por_id") @db.Uuid
+
+  cliente       Cliente?  @relation(fields: [clienteId], references: [id])
+  parceiro      Parceiro? @relation(fields: [parceiroId], references: [id])
+  registradoPor Usuario   @relation("ConsentimentoRegistradoPor", fields: [registradoPorId], references: [id], onDelete: Restrict)
+
+  @@map("consentimento")
+}
+
+// ========================= 4.3 Entrada e triagem =========================
+
+model LoteEntrada {
+  id               String               @id @default(uuid()) @db.Uuid
+  numero           Int                  @unique @default(autoincrement())
+  tipo             TipoEntrada
+  parceiroId       String?              @map("parceiro_id") @db.Uuid
+  campanhaId       String?              @map("campanha_id") @db.Uuid
+  recebidoEm       DateTime             @map("recebido_em") @db.Timestamptz(3)
+  recebidoPorId    String               @map("recebido_por_id") @db.Uuid
+  status           StatusLote           @default(AGUARDANDO_TRIAGEM)
+  documentoTipo    TipoDocumentoOrigem? @map("documento_tipo")
+  documentoNumero  String?              @map("documento_numero")
+  documentoArquivo String?              @map("documento_arquivo")
+  valorCompra      Decimal?             @map("valor_compra") @db.Decimal(10, 2)
+  observacao       String?
+  criadoEm         DateTime             @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  parceiro    Parceiro?   @relation(fields: [parceiroId], references: [id])
+  campanha    Campanha?   @relation(fields: [campanhaId], references: [id])
+  itens       Item[]
+  descartes   Descarte[]
+  contaPagar  ContaPagar?
+  recebidoPor Usuario     @relation("LoteRecebidoPor", fields: [recebidoPorId], references: [id], onDelete: Restrict)
+
+  @@index([parceiroId])
+  @@index([campanhaId])
+  @@index([recebidoEm])
+  @@map("lote_entrada")
+}
+
+model Item {
+  id                String       @id @default(uuid()) @db.Uuid
+  loteId            String       @map("lote_id") @db.Uuid
+  categoriaId       String       @map("categoria_id") @db.Uuid
+  tipoControle      TipoControle @map("tipo_controle")
+  codigoBarras      String?      @unique @map("codigo_barras")
+  descricao         String?
+  valorAtribuido    Decimal      @map("valor_atribuido") @db.Decimal(10, 2)
+  precoVenda        Decimal?     @map("preco_venda") @db.Decimal(10, 2)
+  quantidadeInicial Int          @map("quantidade_inicial")
+  descarteOrigemId  String?      @unique @map("descarte_origem_id") @db.Uuid
+  criadoPorId       String       @map("criado_por_id") @db.Uuid
+  criadoEm          DateTime     @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  lote           LoteEntrada    @relation(fields: [loteId], references: [id])
+  categoria      Categoria      @relation(fields: [categoriaId], references: [id])
+  descarteOrigem Descarte?      @relation("ItemDescarteOrigem", fields: [descarteOrigemId], references: [id])
+  movimentacoes  Movimentacao[]
+  vendaItens     VendaItem[]
+  regras         RegraFiscal[]
+  saldos         SaldoEstoque[]
+  criadoPor      Usuario        @relation("ItemCriadoPor", fields: [criadoPorId], references: [id], onDelete: Restrict)
+
+  @@index([loteId])
+  @@index([categoriaId, tipoControle])
+  @@map("item")
+}
+
+model Descarte {
+  id              String    @id @default(uuid()) @db.Uuid
+  loteId          String    @map("lote_id") @db.Uuid
+  categoriaId     String    @map("categoria_id") @db.Uuid
+  motivoId        String    @map("motivo_id") @db.Uuid
+  descricao       String?
+  observacao      String?
+  registradoPorId String    @map("registrado_por_id") @db.Uuid
+  registradoEm    DateTime  @default(now()) @map("registrado_em") @db.Timestamptz(3)
+  revertidoEm     DateTime? @map("revertido_em") @db.Timestamptz(3)
+  revertidoPorId  String?   @map("revertido_por_id") @db.Uuid
+
+  lote          LoteEntrada    @relation(fields: [loteId], references: [id])
+  categoria     Categoria      @relation(fields: [categoriaId], references: [id])
+  motivo        MotivoDescarte @relation(fields: [motivoId], references: [id])
+  itemReversao  Item?          @relation("ItemDescarteOrigem")
+  registradoPor Usuario        @relation("DescarteRegistradoPor", fields: [registradoPorId], references: [id], onDelete: Restrict)
+  revertidoPor  Usuario?       @relation("DescarteRevertidoPor", fields: [revertidoPorId], references: [id], onDelete: Restrict)
+
+  @@index([loteId])
+  @@index([registradoEm])
+  @@map("descarte")
+}
+
+// ============================== 4.4 Estoque ==============================
+
+model LocalEstoque {
+  id           Int     @id
+  codigo       String  @unique
+  nome         String
+  permiteVenda Boolean @map("permite_venda")
+
+  saidas   Movimentacao[] @relation("MovOrigem")
+  saldos   SaldoEstoque[]
+  entradas Movimentacao[] @relation("MovDestino")
+
+  @@map("local_estoque")
+}
+
+model Movimentacao {
+  id             BigInt           @id @default(autoincrement())
+  itemId         String           @map("item_id") @db.Uuid
+  tipo           TipoMovimentacao
+  localOrigemId  Int?             @map("local_origem_id")
+  localDestinoId Int?             @map("local_destino_id")
+  quantidade     Int
+  vendaItemId    String?          @map("venda_item_id") @db.Uuid
+  motivoBaixaId  String?          @map("motivo_baixa_id") @db.Uuid
+  motivo         String?
+  usuarioId      String           @map("usuario_id") @db.Uuid
+  ocorridoEm     DateTime         @default(now()) @map("ocorrido_em") @db.Timestamptz(3)
+
+  item         Item          @relation(fields: [itemId], references: [id])
+  localOrigem  LocalEstoque? @relation("MovOrigem", fields: [localOrigemId], references: [id])
+  localDestino LocalEstoque? @relation("MovDestino", fields: [localDestinoId], references: [id])
+  vendaItem    VendaItem?    @relation(fields: [vendaItemId], references: [id])
+  motivoBaixa  MotivoBaixa?  @relation(fields: [motivoBaixaId], references: [id])
+  usuario      Usuario       @relation("MovimentacaoUsuario", fields: [usuarioId], references: [id], onDelete: Restrict)
+
+  @@index([itemId])
+  @@index([ocorridoEm])
+  @@index([tipo, ocorridoEm])
+  @@index([vendaItemId])
+  @@map("movimentacao")
+}
+
+/// Saldo derivado de movimentacao (0003). Só o trigger tg_valida_movimentacao escreve aqui;
+/// a API lê pela view vw_saldo_estoque. Índice parcial ix_saldo_positivo_local fica na migração.
+model SaldoEstoque {
+  itemId       String   @map("item_id") @db.Uuid
+  localId      Int      @map("local_id")
+  saldo        Int
+  atualizadoEm DateTime @default(now()) @map("atualizado_em") @db.Timestamptz(3)
+
+  item  Item         @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  local LocalEstoque @relation(fields: [localId], references: [id], onDelete: Restrict)
+
+  @@id([itemId, localId])
+  @@map("saldo_estoque")
+}
+
+// =========================== 4.5 Caixa e venda ===========================
+
+model CaixaSessao {
+  id            String      @id @default(uuid()) @db.Uuid
+  terminalId    String      @map("terminal_id") @db.Uuid
+  status        StatusCaixa @default(ABERTO)
+  abertoPorId   String      @map("aberto_por_id") @db.Uuid
+  abertoEm      DateTime    @default(now()) @map("aberto_em") @db.Timestamptz(3)
+  valorAbertura Decimal     @map("valor_abertura") @db.Decimal(10, 2)
+  fechadoPorId  String?     @map("fechado_por_id") @db.Uuid
+  fechadoEm     DateTime?   @map("fechado_em") @db.Timestamptz(3)
+  valorEsperado Decimal?    @map("valor_esperado") @db.Decimal(10, 2)
+  valorContado  Decimal?    @map("valor_contado") @db.Decimal(10, 2)
+  diferenca     Decimal?    @db.Decimal(10, 2)
+  observacao    String?
+
+  terminal     Terminal          @relation(fields: [terminalId], references: [id])
+  lancamentos  CaixaLancamento[]
+  vendas       Venda[]
+  recebimentos Recebimento[]
+  abertoPor    Usuario           @relation("CaixaAbertoPor", fields: [abertoPorId], references: [id], onDelete: Restrict)
+  fechadoPor   Usuario?          @relation("CaixaFechadoPor", fields: [fechadoPorId], references: [id], onDelete: Restrict)
+
+  @@index([terminalId])
+  @@index([abertoPorId, abertoEm])
+  @@index([abertoEm])
+  @@map("caixa_sessao")
+}
+
+model CaixaLancamento {
+  id        String              @id @default(uuid()) @db.Uuid
+  sessaoId  String              @map("sessao_id") @db.Uuid
+  tipo      TipoLancamentoCaixa
+  valor     Decimal             @db.Decimal(10, 2)
+  motivo    String
+  usuarioId String              @map("usuario_id") @db.Uuid
+  criadoEm  DateTime            @default(now()) @map("criado_em") @db.Timestamptz(3)
+
+  sessao     CaixaSessao @relation(fields: [sessaoId], references: [id])
+  contaPagar ContaPagar?
+  usuario    Usuario     @relation("LancamentoUsuario", fields: [usuarioId], references: [id], onDelete: Restrict)
+
+  @@index([sessaoId])
+  @@map("caixa_lancamento")
+}
+
+model Venda {
+  id                 String              @id @db.Uuid
+  numero             Int                 @unique @default(autoincrement())
+  numeroLocal        String?             @map("numero_local")
+  terminalId         String              @map("terminal_id") @db.Uuid
+  sessaoId           String              @map("sessao_id") @db.Uuid
+  clienteId          String?             @map("cliente_id") @db.Uuid
+  status             StatusVenda         @default(FINALIZADA)
+  origemRegistro     OrigemRegistroVenda @default(ONLINE) @map("origem_registro")
+  subtotal           Decimal             @db.Decimal(10, 2)
+  desconto           Decimal             @default(0) @db.Decimal(10, 2)
+  total              Decimal             @db.Decimal(10, 2)
+  registradaPorId    String              @map("registrada_por_id") @db.Uuid
+  ocorridaEm         DateTime            @map("ocorrida_em") @db.Timestamptz(3)
+  registradaEm       DateTime            @default(now()) @map("registrada_em") @db.Timestamptz(3)
+  canceladaPorId     String?             @map("cancelada_por_id") @db.Uuid
+  canceladaEm        DateTime?           @map("cancelada_em") @db.Timestamptz(3)
+  motivoCancelamento String?             @map("motivo_cancelamento")
+
+  terminal      Terminal         @relation(fields: [terminalId], references: [id])
+  sessao        CaixaSessao      @relation(fields: [sessaoId], references: [id])
+  cliente       Cliente?         @relation(fields: [clienteId], references: [id])
+  itens         VendaItem[]
+  pagamentos    VendaPagamento[]
+  contaReceber  ContaReceber?
+  registradaPor Usuario          @relation("VendaRegistradaPor", fields: [registradaPorId], references: [id], onDelete: Restrict)
+  canceladaPor  Usuario?         @relation("VendaCanceladaPor", fields: [canceladaPorId], references: [id], onDelete: Restrict)
+
+  @@index([ocorridaEm])
+  @@index([sessaoId])
+  @@index([registradaPorId, ocorridaEm])
+  @@map("venda")
+}
+
+model VendaItem {
+  id             String         @id @default(uuid()) @db.Uuid
+  vendaId        String         @map("venda_id") @db.Uuid
+  itemId         String         @map("item_id") @db.Uuid
+  formaSelecao   FormaSelecao   @map("forma_selecao")
+  quantidade     Int
+  precoUnitario  Decimal        @map("preco_unitario") @db.Decimal(10, 2)
+  desconto       Decimal        @default(0) @db.Decimal(10, 2)
+  valorTotal     Decimal        @map("valor_total") @db.Decimal(10, 2)
+  situacaoFiscal SituacaoFiscal @map("situacao_fiscal")
+  aliquota       Decimal        @default(0) @db.Decimal(5, 2)
+  valorImposto   Decimal        @default(0) @map("valor_imposto") @db.Decimal(10, 2)
+  regraFiscalId  String?        @map("regra_fiscal_id") @db.Uuid
+
+  venda         Venda          @relation(fields: [vendaId], references: [id])
+  item          Item           @relation(fields: [itemId], references: [id])
+  regraFiscal   RegraFiscal?   @relation(fields: [regraFiscalId], references: [id])
+  movimentacoes Movimentacao[]
+
+  @@index([vendaId])
+  @@index([itemId])
+  @@map("venda_item")
+}
+
+model VendaPagamento {
+  id            String         @id @default(uuid()) @db.Uuid
+  vendaId       String         @map("venda_id") @db.Uuid
+  forma         FormaPagamento
+  valor         Decimal        @db.Decimal(10, 2)
+  valorRecebido Decimal?       @map("valor_recebido") @db.Decimal(10, 2)
+  troco         Decimal        @default(0) @db.Decimal(10, 2)
+
+  venda Venda @relation(fields: [vendaId], references: [id])
+
+  @@index([vendaId])
+  @@map("venda_pagamento")
+}
+
+model PendenciaSincronizacao {
+  id             String          @id @default(uuid()) @db.Uuid
+  terminalId     String          @map("terminal_id") @db.Uuid
+  tipo           String
+  referenciaId   String          @map("referencia_id")
+  payload        Json
+  motivo         String
+  status         StatusPendencia @default(PENDENTE)
+  criadaEm       DateTime        @default(now()) @map("criada_em") @db.Timestamptz(3)
+  resolvidaPorId String?         @map("resolvida_por_id") @db.Uuid
+  resolvidaEm    DateTime?       @map("resolvida_em") @db.Timestamptz(3)
+  resolucao      String?
+
+  terminal     Terminal @relation(fields: [terminalId], references: [id])
+  resolvidaPor Usuario? @relation("PendenciaResolvidaPor", fields: [resolvidaPorId], references: [id], onDelete: Restrict)
+
+  @@unique([tipo, referenciaId])
+  @@index([terminalId, status])
+  @@index([status, criadaEm])
+  @@map("pendencia_sincronizacao")
+}
+
+// ============================ 4.6 Financeiro ============================
+
+model ContaReceber {
+  id          String             @id @default(uuid()) @db.Uuid
+  clienteId   String             @map("cliente_id") @db.Uuid
+  vendaId     String?            @unique @map("venda_id") @db.Uuid
+  descricao   String
+  valor       Decimal            @db.Decimal(10, 2)
+  vencimento  DateTime           @db.Date
+  status      StatusContaReceber @default(ABERTA)
+  criadaPorId String             @map("criada_por_id") @db.Uuid
+  criadaEm    DateTime           @default(now()) @map("criada_em") @db.Timestamptz(3)
+
+  cliente      Cliente       @relation(fields: [clienteId], references: [id])
+  venda        Venda?        @relation(fields: [vendaId], references: [id])
+  recebimentos Recebimento[]
+  criadaPor    Usuario       @relation("ContaReceberCriadaPor", fields: [criadaPorId], references: [id], onDelete: Restrict)
+
+  @@index([clienteId, status])
+  @@index([vencimento])
+  @@map("conta_receber")
+}
+
+model Recebimento {
+  id             String         @id @default(uuid()) @db.Uuid
+  contaReceberId String         @map("conta_receber_id") @db.Uuid
+  valor          Decimal        @db.Decimal(10, 2)
+  forma          FormaPagamento
+  recebidoEm     DateTime       @default(now()) @map("recebido_em") @db.Timestamptz(3)
+  sessaoId       String?        @map("sessao_id") @db.Uuid
+  usuarioId      String         @map("usuario_id") @db.Uuid
+  observacao     String?
+  estornadoEm    DateTime?      @map("estornado_em") @db.Timestamptz(3)
+  estornadoPorId String?        @map("estornado_por_id") @db.Uuid
+  motivoEstorno  String?        @map("motivo_estorno")
+
+  contaReceber ContaReceber @relation(fields: [contaReceberId], references: [id])
+  sessao       CaixaSessao? @relation(fields: [sessaoId], references: [id])
+  usuario      Usuario      @relation("RecebimentoUsuario", fields: [usuarioId], references: [id], onDelete: Restrict)
+  estornadoPor Usuario?     @relation("RecebimentoEstornadoPor", fields: [estornadoPorId], references: [id], onDelete: Restrict)
+
+  @@index([sessaoId])
+  @@index([contaReceberId])
+  @@index([recebidoEm])
+  @@map("recebimento")
+}
+
+model CategoriaDespesa {
+  id    String  @id @default(uuid()) @db.Uuid
+  nome  String  @unique
+  ativa Boolean @default(true)
+
+  contas ContaPagar[]
+
+  @@map("categoria_despesa")
+}
+
+model ContaPagar {
+  id                 String           @id @default(uuid()) @db.Uuid
+  descricao          String
+  favorecido         String?
+  categoriaDespesaId String?          @map("categoria_despesa_id") @db.Uuid
+  valor              Decimal          @db.Decimal(10, 2)
+  vencimento         DateTime         @db.Date
+  status             StatusContaPagar @default(ABERTA)
+  pagoEm             DateTime?        @map("pago_em") @db.Timestamptz(3)
+  valorPago          Decimal?         @map("valor_pago") @db.Decimal(10, 2)
+  formaPagamento     FormaPagamento?  @map("forma_pagamento")
+  caixaLancamentoId  String?          @unique @map("caixa_lancamento_id") @db.Uuid
+  loteId             String?          @unique @map("lote_id") @db.Uuid
+  observacao         String?
+  criadaPorId        String           @map("criada_por_id") @db.Uuid
+  criadaEm           DateTime         @default(now()) @map("criada_em") @db.Timestamptz(3)
+
+  categoriaDespesa CategoriaDespesa? @relation(fields: [categoriaDespesaId], references: [id])
+  caixaLancamento  CaixaLancamento?  @relation(fields: [caixaLancamentoId], references: [id])
+  lote             LoteEntrada?      @relation(fields: [loteId], references: [id])
+  criadaPor        Usuario           @relation("ContaPagarCriadaPor", fields: [criadaPorId], references: [id], onDelete: Restrict)
+
+  @@index([status, vencimento])
+  @@index([status, pagoEm])
+  @@map("conta_pagar")
+}
+
+// ============================== 4.7 Fiscal ==============================
+
+model RegraFiscal {
+  id              String            @id @default(uuid()) @db.Uuid
+  tributo         String            @default("ICMS")
+  escopo          EscopoRegraFiscal
+  categoriaId     String?           @map("categoria_id") @db.Uuid
+  itemId          String?           @map("item_id") @db.Uuid
+  situacao        SituacaoFiscal
+  aliquota        Decimal           @default(0) @db.Decimal(5, 2)
+  fundamentoLegal String?           @map("fundamento_legal")
+  vigenciaInicio  DateTime          @map("vigencia_inicio") @db.Date
+  vigenciaFim     DateTime?         @map("vigencia_fim") @db.Date
+  criadaPorId     String            @map("criada_por_id") @db.Uuid
+  criadaEm        DateTime          @default(now()) @map("criada_em") @db.Timestamptz(3)
+
+  categoria  Categoria?  @relation(fields: [categoriaId], references: [id])
+  item       Item?       @relation(fields: [itemId], references: [id])
+  vendaItens VendaItem[]
+  criadaPor  Usuario     @relation("RegraFiscalCriadaPor", fields: [criadaPorId], references: [id], onDelete: Restrict)
+
+  @@map("regra_fiscal")
+}
